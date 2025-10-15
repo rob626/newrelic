@@ -1,0 +1,202 @@
+# New Relic Alert Conditions for AWS ECS
+# These can be configured via New Relic UI or using Terraform/API
+
+# ====================
+# 1. HIGH CPU USAGE
+# ====================
+# NRQL: Alerts when CPU utilization exceeds threshold
+# Condition Type: NRQL (Static)
+Name: ECS High CPU Usage
+Query: |
+  SELECT average(cpuPercent) 
+  FROM ContainerSample 
+  WHERE provider = 'EcsContainer' 
+  FACET containerName, clusterName
+Threshold:
+  Critical: > 85% for at least 5 minutes
+  Warning: > 75% for at least 5 minutes
+
+# ====================
+# 2. CPU SPIKE DETECTION
+# ====================
+# NRQL: Detects sudden CPU spikes
+Name: ECS CPU Spike
+Query: |
+  SELECT average(cpuPercent) 
+  FROM ContainerSample 
+  WHERE provider = 'EcsContainer' 
+  FACET containerName, clusterName
+Threshold:
+  Critical: > 90% for at least 2 minutes
+  Warning: > 80% for at least 2 minutes
+
+# ====================
+# 3. HIGH MEMORY USAGE
+# ====================
+# NRQL: Alerts on high memory utilization
+Name: ECS High Memory Usage
+Query: |
+  SELECT average(memoryUtilization) 
+  FROM ContainerSample 
+  WHERE provider = 'EcsContainer' 
+  FACET containerName, clusterName
+Threshold:
+  Critical: > 90% for at least 5 minutes
+  Warning: > 80% for at least 5 minutes
+
+# ====================
+# 4. OUT OF MEMORY (OOM) DETECTION
+# ====================
+# NRQL: Detects containers approaching memory limits
+Name: ECS Near OOM Condition
+Query: |
+  SELECT (average(memoryUsageBytes) / average(memoryLimitBytes)) * 100 as memoryPercent
+  FROM ContainerSample 
+  WHERE provider = 'EcsContainer' 
+  FACET containerName, clusterName
+Threshold:
+  Critical: > 95% for at least 3 minutes
+  Warning: > 90% for at least 3 minutes
+
+# ====================
+# 5. CONTAINER RESTART MONITORING
+# ====================
+# NRQL: Detects frequent container restarts (may indicate OOM kills)
+Name: ECS Frequent Container Restarts
+Query: |
+  SELECT uniqueCount(containerId) 
+  FROM ContainerSample 
+  WHERE provider = 'EcsContainer' 
+  FACET containerName, clusterName
+Threshold:
+  Critical: > 3 restarts in 10 minutes
+  Warning: > 2 restarts in 10 minutes
+
+# ====================
+# 6. TASK FAILURE RATE
+# ====================
+# NRQL: Monitors ECS task failures
+Name: ECS High Task Failure Rate
+Query: |
+  SELECT count(*) 
+  FROM EcsTaskSample 
+  WHERE provider = 'EcsTask' 
+  AND lastStatus = 'STOPPED' 
+  AND stoppedReason IS NOT NULL
+  FACET clusterName, taskDefinitionFamily
+Threshold:
+  Critical: > 5 failures in 5 minutes
+  Warning: > 3 failures in 5 minutes
+
+# ====================
+# 7. CONTAINER UNHEALTHY
+# ====================
+# NRQL: Detects unhealthy containers
+Name: ECS Unhealthy Container
+Query: |
+  SELECT count(*) 
+  FROM ContainerSample 
+  WHERE provider = 'EcsContainer' 
+  AND healthStatus = 'UNHEALTHY'
+  FACET containerName, clusterName
+Threshold:
+  Critical: > 0 for at least 3 minutes
+  Warning: > 0 for at least 2 minutes
+
+# ====================
+# 8. LOW TASK COUNT
+# ====================
+# NRQL: Alerts when running tasks drop below expected count
+Name: ECS Low Task Count
+Query: |
+  SELECT uniqueCount(taskArn) 
+  FROM EcsTaskSample 
+  WHERE provider = 'EcsTask' 
+  AND lastStatus = 'RUNNING'
+  FACET clusterName, serviceName
+Threshold:
+  Critical: < 1 for at least 5 minutes (adjust based on your desired task count)
+  Warning: < 2 for at least 5 minutes
+
+# ====================
+# 9. NETWORK ERRORS
+# ====================
+# NRQL: Monitors network transmission errors
+Name: ECS High Network Errors
+Query: |
+  SELECT sum(transmitErrorsPerSecond + receiveErrorsPerSecond) 
+  FROM ContainerSample 
+  WHERE provider = 'EcsContainer'
+  FACET containerName, clusterName
+Threshold:
+  Critical: > 100 errors/sec for at least 3 minutes
+  Warning: > 50 errors/sec for at least 3 minutes
+
+# ====================
+# 10. STORAGE UTILIZATION
+# ====================
+# NRQL: Monitors container storage usage
+Name: ECS High Storage Usage
+Query: |
+  SELECT (average(ioTotalWriteBytes + ioTotalReadBytes) / 1024 / 1024) as ioMB
+  FROM ContainerSample 
+  WHERE provider = 'EcsContainer'
+  FACET containerName, clusterName
+Threshold:
+  Critical: > 1000 MB/sec for at least 5 minutes (adjust based on workload)
+  Warning: > 800 MB/sec for at least 5 minutes
+
+# ====================
+# TERRAFORM EXAMPLE
+# ====================
+# Example Terraform resource for one of these alerts:
+
+# resource "newrelic_nrql_alert_condition" "ecs_high_cpu" {
+#   account_id                   = var.account_id
+#   policy_id                    = newrelic_alert_policy.ecs_policy.id
+#   type                         = "static"
+#   name                         = "ECS High CPU Usage"
+#   enabled                      = true
+#   violation_time_limit_seconds = 3600
+#   
+#   nrql {
+#     query = "SELECT average(cpuPercent) FROM ContainerSample WHERE provider = 'EcsContainer' FACET containerName, clusterName"
+#   }
+#   
+#   critical {
+#     operator              = "above"
+#     threshold             = 85
+#     threshold_duration    = 300
+#     threshold_occurrences = "all"
+#   }
+#   
+#   warning {
+#     operator              = "above"
+#     threshold             = 75
+#     threshold_duration    = 300
+#     threshold_occurrences = "all"
+#   }
+#   
+#   fill_option        = "none"
+#   aggregation_window = 60
+#   aggregation_method = "event_flow"
+#   aggregation_delay  = 120
+# }
+
+# ====================
+# NOTIFICATION CHANNELS
+# ====================
+# Configure notification channels (Slack, PagerDuty, Email, etc.) in:
+# New Relic UI > Alerts > Notification Channels
+# or via Terraform using newrelic_notification_channel resource
+
+# ====================
+# BEST PRACTICES
+# ====================
+# 1. Adjust thresholds based on your baseline metrics
+# 2. Use FACET to get per-container/service granularity
+# 3. Set appropriate time windows to avoid alert fatigue
+# 4. Group related alerts into the same policy
+# 5. Configure different notification channels for warning vs critical
+# 6. Test alerts in staging before production
+# 7. Review and tune thresholds monthly based on actual usage patterns

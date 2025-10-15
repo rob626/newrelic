@@ -1,5 +1,6 @@
 # New Relic Alert Conditions for AWS ECS
 # These can be configured via New Relic UI or using Terraform/API
+# Configured for ContainerSample with ecs* prefixed fields
 
 # ====================
 # 1. HIGH CPU USAGE
@@ -10,8 +11,8 @@ Name: ECS High CPU Usage
 Query: |
   SELECT average(cpuPercent) 
   FROM ContainerSample 
-  WHERE provider = 'EcsContainer' 
-  FACET containerName, clusterName
+  WHERE ecsClusterName IS NOT NULL 
+  FACET ecsContainerName, ecsClusterName
 Threshold:
   Critical: > 85% for at least 5 minutes
   Warning: > 75% for at least 5 minutes
@@ -24,8 +25,8 @@ Name: ECS CPU Spike
 Query: |
   SELECT average(cpuPercent) 
   FROM ContainerSample 
-  WHERE provider = 'EcsContainer' 
-  FACET containerName, clusterName
+  WHERE ecsClusterName IS NOT NULL 
+  FACET ecsContainerName, ecsClusterName
 Threshold:
   Critical: > 90% for at least 2 minutes
   Warning: > 80% for at least 2 minutes
@@ -36,120 +37,199 @@ Threshold:
 # NRQL: Alerts on high memory utilization
 Name: ECS High Memory Usage
 Query: |
-  SELECT average(memoryUtilization) 
+  SELECT average(memoryUsageLimitPercent) 
   FROM ContainerSample 
-  WHERE provider = 'EcsContainer' 
-  FACET containerName, clusterName
+  WHERE ecsClusterName IS NOT NULL 
+  FACET ecsContainerName, ecsClusterName
 Threshold:
-  Critical: > 90% for at least 5 minutes
-  Warning: > 80% for at least 5 minutes
+  Critical: > 85% for at least 5 minutes
+  Warning: > 75% for at least 5 minutes
 
 # ====================
 # 4. OUT OF MEMORY (OOM) DETECTION
 # ====================
-# NRQL: Detects containers approaching memory limits
+# NRQL: Detects containers approaching memory limits (CRITICAL for OOM prevention)
 Name: ECS Near OOM Condition
 Query: |
-  SELECT (average(memoryUsageBytes) / average(memoryLimitBytes)) * 100 as memoryPercent
+  SELECT average(memoryUsageLimitPercent) as memoryPercent
   FROM ContainerSample 
-  WHERE provider = 'EcsContainer' 
-  FACET containerName, clusterName
+  WHERE ecsClusterName IS NOT NULL 
+  FACET ecsContainerName, ecsClusterName
 Threshold:
-  Critical: > 95% for at least 3 minutes
-  Warning: > 90% for at least 3 minutes
+  Critical: > 95% for at least 2 minutes (imminent OOM)
+  Warning: > 90% for at least 3 minutes (OOM risk)
+Notes: |
+  This is your primary OOM detection alert. When memory hits 95%+, 
+  the container is at extreme risk of being killed by the kernel.
+  Consider auto-scaling or increasing memory limits if this fires frequently.
 
 # ====================
 # 5. CONTAINER RESTART MONITORING
 # ====================
-# NRQL: Detects frequent container restarts (may indicate OOM kills)
+# NRQL: Detects frequent container restarts (often indicates OOM kills or crashes)
 Name: ECS Frequent Container Restarts
 Query: |
-  SELECT uniqueCount(containerId) 
+  SELECT max(restartCount) 
   FROM ContainerSample 
-  WHERE provider = 'EcsContainer' 
-  FACET containerName, clusterName
+  WHERE ecsClusterName IS NOT NULL 
+  FACET ecsContainerName, ecsClusterName
 Threshold:
   Critical: > 3 restarts in 10 minutes
   Warning: > 2 restarts in 10 minutes
+Notes: |
+  Frequent restarts often indicate OOM kills (since exitCode isn't available).
+  Investigate memory usage patterns when this alert fires.
 
 # ====================
-# 6. TASK FAILURE RATE
+# 6. CONTAINER STATUS MONITORING
 # ====================
-# NRQL: Monitors ECS task failures
-Name: ECS High Task Failure Rate
-Query: |
-  SELECT count(*) 
-  FROM EcsTaskSample 
-  WHERE provider = 'EcsTask' 
-  AND lastStatus = 'STOPPED' 
-  AND stoppedReason IS NOT NULL
-  FACET clusterName, taskDefinitionFamily
-Threshold:
-  Critical: > 5 failures in 5 minutes
-  Warning: > 3 failures in 5 minutes
-
-# ====================
-# 7. CONTAINER UNHEALTHY
-# ====================
-# NRQL: Detects unhealthy containers
-Name: ECS Unhealthy Container
+# NRQL: Monitors container status changes (stopped, stopping, etc.)
+Name: ECS Container Not Running
 Query: |
   SELECT count(*) 
   FROM ContainerSample 
-  WHERE provider = 'EcsContainer' 
-  AND healthStatus = 'UNHEALTHY'
-  FACET containerName, clusterName
+  WHERE ecsClusterName IS NOT NULL 
+  AND status != 'running'
+  FACET ecsContainerName, ecsClusterName, status
 Threshold:
   Critical: > 0 for at least 3 minutes
   Warning: > 0 for at least 2 minutes
+Notes: |
+  Alerts when containers are not in 'running' state.
+  Check the 'status' facet to see what state they're in.
 
 # ====================
-# 8. LOW TASK COUNT
+# 7. KERNEL MEMORY PRESSURE
 # ====================
-# NRQL: Alerts when running tasks drop below expected count
-Name: ECS Low Task Count
+# NRQL: Monitors kernel memory usage (can indicate memory pressure)
+Name: ECS High Kernel Memory Usage
 Query: |
-  SELECT uniqueCount(taskArn) 
-  FROM EcsTaskSample 
-  WHERE provider = 'EcsTask' 
-  AND lastStatus = 'RUNNING'
-  FACET clusterName, serviceName
+  SELECT average(memoryKernelUsageBytes) / 1024 / 1024 as kernelMemoryMB
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  FACET ecsContainerName, ecsClusterName
 Threshold:
-  Critical: < 1 for at least 5 minutes (adjust based on your desired task count)
-  Warning: < 2 for at least 5 minutes
+  Critical: > 512 MB for at least 5 minutes (adjust based on your containers)
+  Warning: > 256 MB for at least 5 minutes
+Notes: |
+  High kernel memory can indicate issues with system calls, networking, or file operations.
+  Adjust thresholds based on your container's normal kernel memory usage.
 
 # ====================
-# 9. NETWORK ERRORS
+# 8. CONTAINER COUNT MONITORING
 # ====================
-# NRQL: Monitors network transmission errors
+# NRQL: Alerts when container count drops (potential service degradation)
+Name: ECS Low Container Count
+Query: |
+  SELECT uniqueCount(ecsContainerName) as containerCount
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  AND status = 'running'
+  FACET ecsClusterName
+Threshold:
+  Critical: < 1 for at least 5 minutes (adjust based on expected count)
+  Warning: < 2 for at least 5 minutes
+Notes: |
+  Adjust thresholds based on your expected container count per cluster.
+  This detects when your service scales down unexpectedly or containers crash.
+
+# ====================
+# 9. NETWORK ERRORS & DROPPED PACKETS
+# ====================
+# NRQL: Monitors network errors and packet loss
 Name: ECS High Network Errors
 Query: |
-  SELECT sum(transmitErrorsPerSecond + receiveErrorsPerSecond) 
+  SELECT sum(networkRxDropped + networkTxDropped) as droppedPackets
   FROM ContainerSample 
-  WHERE provider = 'EcsContainer'
-  FACET containerName, clusterName
+  WHERE ecsClusterName IS NOT NULL
+  FACET ecsContainerName, ecsClusterName
 Threshold:
-  Critical: > 100 errors/sec for at least 3 minutes
-  Warning: > 50 errors/sec for at least 3 minutes
+  Critical: > 1000 dropped packets for at least 3 minutes
+  Warning: > 500 dropped packets for at least 3 minutes
+Notes: |
+  High dropped packets indicate network congestion or misconfiguration.
+  Also check networkRxErrors and networkTxErrors if available.
+
+# Optional: High Network Throughput Alert
+# Name: ECS High Network Throughput
+# Query: |
+#   SELECT (sum(networkRxBytes + networkTxBytes) / 1024 / 1024) as networkMB
+#   FROM ContainerSample 
+#   WHERE ecsClusterName IS NOT NULL
+#   FACET ecsContainerName, ecsClusterName
+# Threshold:
+#   Critical: > 1000 MB for at least 5 minutes
+#   Warning: > 800 MB for at least 5 minutes
 
 # ====================
-# 10. STORAGE UTILIZATION
+# 10. STORAGE/IO MONITORING
 # ====================
-# NRQL: Monitors container storage usage
-Name: ECS High Storage Usage
+# NRQL: Monitors disk I/O usage (can indicate disk thrashing or heavy workloads)
+Name: ECS High Storage I/O
 Query: |
-  SELECT (average(ioTotalWriteBytes + ioTotalReadBytes) / 1024 / 1024) as ioMB
+  SELECT (sum(ioReadBytes + ioWriteBytes) / 1024 / 1024) as ioMB
   FROM ContainerSample 
-  WHERE provider = 'EcsContainer'
-  FACET containerName, clusterName
+  WHERE ecsClusterName IS NOT NULL
+  FACET ecsContainerName, ecsClusterName
 Threshold:
-  Critical: > 1000 MB/sec for at least 5 minutes (adjust based on workload)
-  Warning: > 800 MB/sec for at least 5 minutes
+  Critical: > 5000 MB for at least 5 minutes (adjust based on workload)
+  Warning: > 3000 MB for at least 5 minutes
+Notes: |
+  Sustained high I/O can indicate:
+  - Database workloads without proper caching
+  - Log file issues
+  - Memory swapping (check memory usage too!)
+  - Adjust thresholds based on your container's normal I/O patterns
+
+# Optional: I/O Operations Per Second
+# Name: ECS High I/O Operations
+# Query: |
+#   SELECT sum(ioReadOps + ioWriteOps) as iops
+#   FROM ContainerSample 
+#   WHERE ecsClusterName IS NOT NULL
+#   FACET ecsContainerName, ecsClusterName
+# Threshold:
+#   Critical: > 10000 IOPS for at least 5 minutes
+#   Warning: > 7500 IOPS for at least 5 minutes
 
 # ====================
 # TERRAFORM EXAMPLE
 # ====================
-# Example Terraform resource for one of these alerts:
+# Example Terraform resource for the OOM alert:
+
+# resource "newrelic_nrql_alert_condition" "ecs_near_oom" {
+#   account_id                   = var.account_id
+#   policy_id                    = newrelic_alert_policy.ecs_policy.id
+#   type                         = "static"
+#   name                         = "ECS Near OOM Condition"
+#   enabled                      = true
+#   violation_time_limit_seconds = 3600
+#   
+#   nrql {
+#     query = "SELECT average(memoryUsageLimitPercent) FROM ContainerSample WHERE ecsClusterName IS NOT NULL FACET ecsContainerName, ecsClusterName"
+#   }
+#   
+#   critical {
+#     operator              = "above"
+#     threshold             = 95
+#     threshold_duration    = 120
+#     threshold_occurrences = "all"
+#   }
+#   
+#   warning {
+#     operator              = "above"
+#     threshold             = 90
+#     threshold_duration    = 180
+#     threshold_occurrences = "all"
+#   }
+#   
+#   fill_option        = "none"
+#   aggregation_window = 60
+#   aggregation_method = "event_flow"
+#   aggregation_delay  = 120
+# }
+
+# Example Terraform resource for CPU alert:
 
 # resource "newrelic_nrql_alert_condition" "ecs_high_cpu" {
 #   account_id                   = var.account_id
@@ -160,7 +240,7 @@ Threshold:
 #   violation_time_limit_seconds = 3600
 #   
 #   nrql {
-#     query = "SELECT average(cpuPercent) FROM ContainerSample WHERE provider = 'EcsContainer' FACET containerName, clusterName"
+#     query = "SELECT average(cpuPercent) FROM ContainerSample WHERE ecsClusterName IS NOT NULL FACET ecsContainerName, ecsClusterName"
 #   }
 #   
 #   critical {
@@ -194,9 +274,45 @@ Threshold:
 # BEST PRACTICES
 # ====================
 # 1. Adjust thresholds based on your baseline metrics
-# 2. Use FACET to get per-container/service granularity
+#    Run queries with 'SINCE 7 days ago' to see normal patterns
+# 
+# 2. Use FACET to get per-container/cluster granularity
+#    This helps identify which specific containers have issues
+# 
 # 3. Set appropriate time windows to avoid alert fatigue
+#    Start with longer windows (5+ min) and tighten as needed
+# 
 # 4. Group related alerts into the same policy
+#    Example: "ECS Production Alerts" or "ECS Memory Alerts"
+# 
 # 5. Configure different notification channels for warning vs critical
+#    Warnings -> Slack, Critical -> PagerDuty
+# 
 # 6. Test alerts in staging before production
+#    Create a staging policy with tighter thresholds first
+# 
 # 7. Review and tune thresholds monthly based on actual usage patterns
+#    Use New Relic dashboards to visualize trends
+#
+# 8. For OOM prevention, implement a 3-tier approach:
+#    - 90% memory = Warning (investigate and plan)
+#    - 95% memory = Critical (immediate action needed)
+#    - Restart count increase = Post-incident analysis
+#
+# 9. Since exitCode isn't available, correlate restart patterns with memory spikes
+#    to identify OOM kills retrospectively
+
+# ====================
+# SETUP NOTES FOR YOUR ENVIRONMENT
+# ====================
+# Your New Relic setup uses:
+# - Field prefix: ecs* (ecsContainerName, ecsClusterName)
+# - Available: cpuPercent, memoryUsageLimitPercent, memorySizeLimitBytes, 
+#              memoryUsageBytes, memoryKernelUsageBytes, status, restartCount
+# - NOT available: exitCode, healthStatus, EcsTaskSample
+#
+# Next steps:
+# 1. Check if you have network fields (networkRx*, networkTx*)
+# 2. Check if you have I/O fields (ioRead*, ioWrite*)
+# 3. Add those optional alerts if fields exist
+# 4. Establish baseline thresholds by running queries with SINCE 7 days ago

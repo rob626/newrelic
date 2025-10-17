@@ -1,73 +1,218 @@
-# New Relic Alert Conditions for AWS ECS
-# These can be configured via New Relic UI or using Terraform/API
+# ============================================================================
+# COMPREHENSIVE NEW RELIC ALERT CONDITIONS FOR AWS ECS
+# ============================================================================
+# Covers the most common ECS/container production issues
 # Configured for ContainerSample with ecs* prefixed fields
+# Tested field names: ecsContainerName, ecsClusterName, cpuPercent, 
+#                     memoryUsageLimitPercent, status, restartCount, etc.
+# ============================================================================
 
-# ====================
-# 1. HIGH CPU USAGE
-# ====================
-# NRQL: Alerts when CPU utilization exceeds threshold
-# Condition Type: NRQL (Static)
-Name: ECS High CPU Usage
-Query: |
-  SELECT average(cpuPercent) 
-  FROM ContainerSample 
-  WHERE ecsClusterName IS NOT NULL 
-  FACET ecsContainerName, ecsClusterName
-Threshold:
-  Critical: > 85% for at least 5 minutes
-  Warning: > 75% for at least 5 minutes
+# ============================================================================
+# CATEGORY 1: MEMORY & OOM ISSUES (CRITICAL)
+# ============================================================================
 
-# ====================
-# 2. CPU SPIKE DETECTION
-# ====================
-# NRQL: Detects sudden CPU spikes
-Name: ECS CPU Spike
-Query: |
-  SELECT average(cpuPercent) 
-  FROM ContainerSample 
-  WHERE ecsClusterName IS NOT NULL 
-  FACET ecsContainerName, ecsClusterName
-Threshold:
-  Critical: > 90% for at least 2 minutes
-  Warning: > 80% for at least 2 minutes
-
-# ====================
-# 3. HIGH MEMORY USAGE
-# ====================
-# NRQL: Alerts on high memory utilization
-Name: ECS High Memory Usage
-Query: |
-  SELECT average(memoryUsageLimitPercent) 
-  FROM ContainerSample 
-  WHERE ecsClusterName IS NOT NULL 
-  FACET ecsContainerName, ecsClusterName
-Threshold:
-  Critical: > 85% for at least 5 minutes
-  Warning: > 75% for at least 5 minutes
-
-# ====================
-# 4. OUT OF MEMORY (OOM) DETECTION
-# ====================
-# NRQL: Detects containers approaching memory limits (CRITICAL for OOM prevention)
-Name: ECS Near OOM Condition
+# ----------------------------------------------------------------------------
+# 1.1 IMMINENT OOM - CRITICAL
+# ----------------------------------------------------------------------------
+Name: ECS Imminent OOM
+Priority: P1 - Critical
 Query: |
   SELECT average(memoryUsageLimitPercent) as memoryPercent
   FROM ContainerSample 
   WHERE ecsClusterName IS NOT NULL 
   FACET ecsContainerName, ecsClusterName
 Threshold:
-  Critical: > 95% for at least 2 minutes (imminent OOM)
-  Warning: > 90% for at least 3 minutes (OOM risk)
-Notes: |
-  This is your primary OOM detection alert. When memory hits 95%+, 
-  the container is at extreme risk of being killed by the kernel.
-  Consider auto-scaling or increasing memory limits if this fires frequently.
+  Critical: > 95% for at least 2 minutes
+Description: |
+  Container is at extreme risk of OOM kill. Immediate action required.
+  The kernel will kill the container when it exceeds memory limit.
+Remediation: |
+  - Check application memory leaks
+  - Increase task memory limits
+  - Review recent deployments
+  - Scale horizontally if possible
 
-# ====================
-# 5. CONTAINER RESTART MONITORING
-# ====================
-# NRQL: Detects frequent container restarts (often indicates OOM kills or crashes)
+# ----------------------------------------------------------------------------
+# 1.2 HIGH MEMORY USAGE - WARNING
+# ----------------------------------------------------------------------------
+Name: ECS High Memory Usage
+Priority: P2 - Warning
+Query: |
+  SELECT average(memoryUsageLimitPercent) as memoryPercent
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 85% for at least 5 minutes
+  Warning: > 75% for at least 5 minutes
+Description: |
+  Container memory usage is elevated. Monitor closely.
+Remediation: |
+  - Review memory trends over time
+  - Check for memory leaks
+  - Consider increasing memory allocation
+
+# ----------------------------------------------------------------------------
+# 1.3 MEMORY LEAK DETECTION
+# ----------------------------------------------------------------------------
+Name: ECS Memory Leak Pattern
+Priority: P2 - Warning
+Query: |
+  SELECT rate(sum(memoryUsageBytes), 1 minute) as memoryGrowthRate
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: Consistent positive rate for 15+ minutes
+  Warning: Consistent positive rate for 10+ minutes
+Description: |
+  Memory usage is steadily increasing without decrease, indicating potential leak.
+Remediation: |
+  - Profile application memory usage
+  - Check for unclosed connections or resources
+  - Review recent code changes
+  - Restart container if necessary
+
+# ----------------------------------------------------------------------------
+# 1.4 KERNEL MEMORY PRESSURE
+# ----------------------------------------------------------------------------
+Name: ECS High Kernel Memory
+Priority: P2 - Warning
+Query: |
+  SELECT average(memoryKernelUsageBytes) / 1024 / 1024 as kernelMemoryMB
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 512 MB for at least 5 minutes
+  Warning: > 256 MB for at least 5 minutes
+Description: |
+  High kernel memory can indicate issues with networking, file handles, or system calls.
+Remediation: |
+  - Check for connection leaks
+  - Review file descriptor usage
+  - Investigate system call patterns
+
+# ----------------------------------------------------------------------------
+# 1.5 SWAP USAGE (if available)
+# ----------------------------------------------------------------------------
+Name: ECS Container Swapping
+Priority: P1 - Critical
+Query: |
+  SELECT average(memorySwapUsageBytes) / 1024 / 1024 as swapMB
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  AND memorySwapUsageBytes IS NOT NULL
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 100 MB for at least 3 minutes
+  Warning: > 50 MB for at least 3 minutes
+Description: |
+  Container is swapping to disk, indicating severe memory pressure.
+  Performance will be significantly degraded.
+Remediation: |
+  - Increase container memory immediately
+  - Check for memory leaks
+  - Review workload requirements
+
+# ============================================================================
+# CATEGORY 2: CPU ISSUES
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 2.1 CPU SPIKE - IMMEDIATE
+# ----------------------------------------------------------------------------
+Name: ECS CPU Spike
+Priority: P1 - Critical
+Query: |
+  SELECT average(cpuPercent) 
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 95% for at least 2 minutes
+  Warning: > 90% for at least 2 minutes
+Description: |
+  Sudden CPU spike detected. May indicate runaway process or DDoS.
+Remediation: |
+  - Check application logs for errors
+  - Review recent traffic patterns
+  - Check for infinite loops or deadlocks
+  - Monitor for malicious activity
+
+# ----------------------------------------------------------------------------
+# 2.2 SUSTAINED HIGH CPU
+# ----------------------------------------------------------------------------
+Name: ECS Sustained High CPU
+Priority: P2 - Warning
+Query: |
+  SELECT average(cpuPercent) 
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 85% for at least 10 minutes
+  Warning: > 75% for at least 10 minutes
+Description: |
+  Container CPU usage is consistently high. May need scaling.
+Remediation: |
+  - Scale horizontally (add containers)
+  - Optimize application code
+  - Review CPU-intensive operations
+  - Consider vertical scaling
+
+# ----------------------------------------------------------------------------
+# 2.3 CPU THROTTLING
+# ----------------------------------------------------------------------------
+Name: ECS CPU Throttling
+Priority: P2 - Warning
+Query: |
+  SELECT average(cpuThrottledPercent) as throttledPercent
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  AND cpuThrottledPercent IS NOT NULL
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 50% for at least 5 minutes
+  Warning: > 30% for at least 5 minutes
+Description: |
+  Container is being CPU throttled, limiting performance.
+Remediation: |
+  - Increase CPU allocation
+  - Optimize application CPU usage
+  - Review CPU limits vs reservation
+
+# ----------------------------------------------------------------------------
+# 2.4 LOW CPU WITH HIGH LOAD
+# ----------------------------------------------------------------------------
+Name: ECS I/O Wait High
+Priority: P2 - Warning
+Query: |
+  SELECT average(cpuIOWaitPercent) as ioWaitPercent
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  AND cpuIOWaitPercent IS NOT NULL
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 40% for at least 5 minutes
+  Warning: > 25% for at least 5 minutes
+Description: |
+  High I/O wait indicates CPU is blocked waiting for disk/network operations.
+Remediation: |
+  - Optimize database queries
+  - Check disk performance
+  - Review network latency
+  - Add caching layer
+
+# ============================================================================
+# CATEGORY 3: CONTAINER LIFECYCLE & STABILITY
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 3.1 FREQUENT RESTARTS (OOM INDICATOR)
+# ----------------------------------------------------------------------------
 Name: ECS Frequent Container Restarts
+Priority: P1 - Critical
 Query: |
   SELECT max(restartCount) 
   FROM ContainerSample 
@@ -76,15 +221,20 @@ Query: |
 Threshold:
   Critical: > 3 restarts in 10 minutes
   Warning: > 2 restarts in 10 minutes
-Notes: |
-  Frequent restarts often indicate OOM kills (since exitCode isn't available).
-  Investigate memory usage patterns when this alert fires.
+Description: |
+  Container is restarting frequently. Often indicates OOM kills or crashes.
+  Correlate with memory usage.
+Remediation: |
+  - Check container logs before restart
+  - Review memory usage patterns
+  - Check for application crashes
+  - Review health check configuration
 
-# ====================
-# 6. CONTAINER STATUS MONITORING
-# ====================
-# NRQL: Monitors container status changes (stopped, stopping, etc.)
-Name: ECS Container Not Running
+# ----------------------------------------------------------------------------
+# 3.2 CONTAINER NOT RUNNING
+# ----------------------------------------------------------------------------
+Name: ECS Container Stopped
+Priority: P1 - Critical
 Query: |
   SELECT count(*) 
   FROM ContainerSample 
@@ -94,32 +244,41 @@ Query: |
 Threshold:
   Critical: > 0 for at least 3 minutes
   Warning: > 0 for at least 2 minutes
-Notes: |
-  Alerts when containers are not in 'running' state.
-  Check the 'status' facet to see what state they're in.
+Description: |
+  Container is not in running state. Service may be degraded.
+Remediation: |
+  - Check container status in ECS console
+  - Review task logs
+  - Check for deployment failures
+  - Verify resource availability
 
-# ====================
-# 7. KERNEL MEMORY PRESSURE
-# ====================
-# NRQL: Monitors kernel memory usage (can indicate memory pressure)
-Name: ECS High Kernel Memory Usage
+# ----------------------------------------------------------------------------
+# 3.3 CONTAINER STUCK IN TRANSITION
+# ----------------------------------------------------------------------------
+Name: ECS Container Stuck Stopping
+Priority: P2 - Warning
 Query: |
-  SELECT average(memoryKernelUsageBytes) / 1024 / 1024 as kernelMemoryMB
+  SELECT count(*) 
   FROM ContainerSample 
   WHERE ecsClusterName IS NOT NULL 
-  FACET ecsContainerName, ecsClusterName
+  AND (status = 'stopping' OR status = 'stopped')
+  FACET ecsContainerName, ecsClusterName, status
 Threshold:
-  Critical: > 512 MB for at least 5 minutes (adjust based on your containers)
-  Warning: > 256 MB for at least 5 minutes
-Notes: |
-  High kernel memory can indicate issues with system calls, networking, or file operations.
-  Adjust thresholds based on your container's normal kernel memory usage.
+  Critical: > 0 for at least 5 minutes
+  Warning: > 0 for at least 3 minutes
+Description: |
+  Container stuck in stopping state. May need manual intervention.
+Remediation: |
+  - Check for graceful shutdown issues
+  - Review SIGTERM handling in application
+  - Check for hung processes
+  - May need force stop
 
-# ====================
-# 8. CONTAINER COUNT MONITORING
-# ====================
-# NRQL: Alerts when container count drops (potential service degradation)
-Name: ECS Low Container Count
+# ----------------------------------------------------------------------------
+# 3.4 LOW CONTAINER COUNT
+# ----------------------------------------------------------------------------
+Name: ECS Low Running Container Count
+Priority: P1 - Critical
 Query: |
   SELECT uniqueCount(ecsContainerName) as containerCount
   FROM ContainerSample 
@@ -127,192 +286,423 @@ Query: |
   AND status = 'running'
   FACET ecsClusterName
 Threshold:
-  Critical: < 1 for at least 5 minutes (adjust based on expected count)
-  Warning: < 2 for at least 5 minutes
-Notes: |
-  Adjust thresholds based on your expected container count per cluster.
-  This detects when your service scales down unexpectedly or containers crash.
+  Critical: < 1 for at least 3 minutes
+  Warning: < 2 for at least 3 minutes
+Description: |
+  Running container count below expected threshold. Service degradation likely.
+Remediation: |
+  - Check ECS service desired count
+  - Review auto-scaling policies
+  - Check for deployment failures
+  - Verify cluster capacity
 
-# ====================
-# 9. NETWORK ERRORS & DROPPED PACKETS
-# ====================
-# NRQL: Monitors network errors and packet loss
-Name: ECS High Network Errors
+# ----------------------------------------------------------------------------
+# 3.5 CONTAINER AGE EXCESSIVE
+# ----------------------------------------------------------------------------
+Name: ECS Container Running Too Long
+Priority: P3 - Info
+Query: |
+  SELECT latest(timestamp) - min(timestamp) as uptimeHours
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  AND status = 'running'
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Warning: > 168 hours (7 days)
+  Info: > 336 hours (14 days)
+Description: |
+  Container has been running for extended period without restart.
+  May indicate stale deployment or missed updates.
+Remediation: |
+  - Review deployment schedule
+  - Consider scheduled restarts
+  - Check for configuration drift
+  - Verify latest image is deployed
+
+# ----------------------------------------------------------------------------
+# 3.6 RAPID CONTAINER CHURN
+# ----------------------------------------------------------------------------
+Name: ECS Rapid Container Churn
+Priority: P2 - Warning
+Query: |
+  SELECT uniqueCount(containerId) as containerChurn
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 10 unique containers in 15 minutes
+  Warning: > 5 unique containers in 15 minutes
+Description: |
+  Containers are being created and destroyed rapidly.
+  Indicates instability or thrashing.
+Remediation: |
+  - Check health check configuration
+  - Review resource limits
+  - Check for deployment loops
+  - Investigate crash patterns
+
+# ============================================================================
+# CATEGORY 4: NETWORK ISSUES
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 4.1 HIGH NETWORK PACKET DROPS
+# ----------------------------------------------------------------------------
+Name: ECS High Network Packet Loss
+Priority: P1 - Critical
 Query: |
   SELECT sum(networkRxDropped + networkTxDropped) as droppedPackets
   FROM ContainerSample 
   WHERE ecsClusterName IS NOT NULL
   FACET ecsContainerName, ecsClusterName
 Threshold:
-  Critical: > 1000 dropped packets for at least 3 minutes
-  Warning: > 500 dropped packets for at least 3 minutes
-Notes: |
-  High dropped packets indicate network congestion or misconfiguration.
-  Also check networkRxErrors and networkTxErrors if available.
+  Critical: > 1000 packets for at least 3 minutes
+  Warning: > 500 packets for at least 3 minutes
+Description: |
+  Significant network packet loss detected. May cause timeouts and failures.
+Remediation: |
+  - Check network configuration
+  - Review security group rules
+  - Check for bandwidth saturation
+  - Investigate network congestion
 
-# Optional: High Network Throughput Alert
-# Name: ECS High Network Throughput
-# Query: |
-#   SELECT (sum(networkRxBytes + networkTxBytes) / 1024 / 1024) as networkMB
-#   FROM ContainerSample 
-#   WHERE ecsClusterName IS NOT NULL
-#   FACET ecsContainerName, ecsClusterName
-# Threshold:
-#   Critical: > 1000 MB for at least 5 minutes
-#   Warning: > 800 MB for at least 5 minutes
+# ----------------------------------------------------------------------------
+# 4.2 NETWORK ERRORS
+# ----------------------------------------------------------------------------
+Name: ECS Network Transmission Errors
+Priority: P2 - Warning
+Query: |
+  SELECT sum(networkRxErrors + networkTxErrors) as networkErrors
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL
+  AND (networkRxErrors IS NOT NULL OR networkTxErrors IS NOT NULL)
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 100 errors for at least 3 minutes
+  Warning: > 50 errors for at least 3 minutes
+Description: |
+  Network transmission errors occurring. May indicate connectivity issues.
+Remediation: |
+  - Check network interface health
+  - Review ENI configuration
+  - Check for network driver issues
+  - Verify VPC configuration
 
-# ====================
-# 10. STORAGE/IO MONITORING
-# ====================
-# NRQL: Monitors disk I/O usage (can indicate disk thrashing or heavy workloads)
+# ----------------------------------------------------------------------------
+# 4.3 ABNORMAL NETWORK THROUGHPUT
+# ----------------------------------------------------------------------------
+Name: ECS Excessive Network Traffic
+Priority: P2 - Warning
+Query: |
+  SELECT (sum(networkRxBytes + networkTxBytes) / 1024 / 1024 / 1024) as networkGB
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 100 GB in 5 minutes (adjust for your workload)
+  Warning: > 50 GB in 5 minutes
+Description: |
+  Abnormally high network traffic. May indicate data exfiltration or misconfiguration.
+Remediation: |
+  - Review application traffic patterns
+  - Check for data transfer loops
+  - Investigate security incidents
+  - Review API integrations
+
+# ----------------------------------------------------------------------------
+# 4.4 CONNECTION SATURATION
+# ----------------------------------------------------------------------------
+Name: ECS High Connection Count
+Priority: P2 - Warning
+Query: |
+  SELECT max(networkConnectionCount) as connections
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL
+  AND networkConnectionCount IS NOT NULL
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 10000 connections for at least 3 minutes
+  Warning: > 5000 connections for at least 3 minutes
+Description: |
+  Very high connection count. May exhaust file descriptors or memory.
+Remediation: |
+  - Check for connection leaks
+  - Implement connection pooling
+  - Review keep-alive settings
+  - Check for DDoS attack
+
+# ============================================================================
+# CATEGORY 5: DISK & STORAGE I/O
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 5.1 HIGH DISK I/O
+# ----------------------------------------------------------------------------
 Name: ECS High Storage I/O
+Priority: P2 - Warning
 Query: |
   SELECT (sum(ioReadBytes + ioWriteBytes) / 1024 / 1024) as ioMB
   FROM ContainerSample 
   WHERE ecsClusterName IS NOT NULL
   FACET ecsContainerName, ecsClusterName
 Threshold:
-  Critical: > 5000 MB for at least 5 minutes (adjust based on workload)
-  Warning: > 3000 MB for at least 5 minutes
-Notes: |
-  Sustained high I/O can indicate:
-  - Database workloads without proper caching
-  - Log file issues
-  - Memory swapping (check memory usage too!)
-  - Adjust thresholds based on your container's normal I/O patterns
+  Critical: > 5000 MB in 5 minutes
+  Warning: > 3000 MB in 5 minutes
+Description: |
+  Very high disk I/O. May indicate thrashing, logging issues, or performance problems.
+Remediation: |
+  - Check log volume and rotation
+  - Review database query patterns
+  - Check for memory swapping
+  - Optimize file operations
 
-# Optional: I/O Operations Per Second
-# Name: ECS High I/O Operations
-# Query: |
-#   SELECT sum(ioReadOps + ioWriteOps) as iops
-#   FROM ContainerSample 
-#   WHERE ecsClusterName IS NOT NULL
-#   FACET ecsContainerName, ecsClusterName
-# Threshold:
-#   Critical: > 10000 IOPS for at least 5 minutes
-#   Warning: > 7500 IOPS for at least 5 minutes
+# ----------------------------------------------------------------------------
+# 5.2 EXCESSIVE I/O OPERATIONS
+# ----------------------------------------------------------------------------
+Name: ECS High IOPS
+Priority: P2 - Warning
+Query: |
+  SELECT sum(ioReadOps + ioWriteOps) as iops
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL
+  AND (ioReadOps IS NOT NULL OR ioWriteOps IS NOT NULL)
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 10000 operations in 5 minutes
+  Warning: > 7500 operations in 5 minutes
+Description: |
+  Very high number of I/O operations. May cause performance degradation.
+Remediation: |
+  - Optimize database access patterns
+  - Implement caching
+  - Review file access patterns
+  - Check for small I/O operations
 
-# ====================
-# TERRAFORM EXAMPLE
-# ====================
-# Example Terraform resource for the OOM alert:
+# ----------------------------------------------------------------------------
+# 5.3 EPHEMERAL STORAGE EXHAUSTION
+# ----------------------------------------------------------------------------
+Name: ECS Ephemeral Storage Full
+Priority: P1 - Critical
+Query: |
+  SELECT (average(diskUsedBytes) / average(diskTotalBytes)) * 100 as diskPercent
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL
+  AND diskTotalBytes IS NOT NULL
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 90% for at least 3 minutes
+  Warning: > 80% for at least 5 minutes
+Description: |
+  Container ephemeral storage nearly full. Will cause write failures.
+Remediation: |
+  - Increase ephemeral storage allocation
+  - Clean up temporary files
+  - Review log retention
+  - Check for large file writes
 
-# resource "newrelic_nrql_alert_condition" "ecs_near_oom" {
-#   account_id                   = var.account_id
-#   policy_id                    = newrelic_alert_policy.ecs_policy.id
-#   type                         = "static"
-#   name                         = "ECS Near OOM Condition"
-#   enabled                      = true
-#   violation_time_limit_seconds = 3600
-#   
-#   nrql {
-#     query = "SELECT average(memoryUsageLimitPercent) FROM ContainerSample WHERE ecsClusterName IS NOT NULL FACET ecsContainerName, ecsClusterName"
-#   }
-#   
-#   critical {
-#     operator              = "above"
-#     threshold             = 95
-#     threshold_duration    = 120
-#     threshold_occurrences = "all"
-#   }
-#   
-#   warning {
-#     operator              = "above"
-#     threshold             = 90
-#     threshold_duration    = 180
-#     threshold_occurrences = "all"
-#   }
-#   
-#   fill_option        = "none"
-#   aggregation_window = 60
-#   aggregation_method = "event_flow"
-#   aggregation_delay  = 120
-# }
+# ----------------------------------------------------------------------------
+# 5.4 I/O LATENCY HIGH
+# ----------------------------------------------------------------------------
+Name: ECS High I/O Latency
+Priority: P2 - Warning
+Query: |
+  SELECT average(ioLatencyMs) as latencyMs
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL
+  AND ioLatencyMs IS NOT NULL
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 100 ms for at least 5 minutes
+  Warning: > 50 ms for at least 5 minutes
+Description: |
+  Disk I/O latency is elevated. Application performance affected.
+Remediation: |
+  - Check EBS volume performance
+  - Review IOPS provisioning
+  - Check for disk contention
+  - Consider using faster storage tier
 
-# Example Terraform resource for CPU alert:
+# ============================================================================
+# CATEGORY 6: RESOURCE EXHAUSTION
+# ============================================================================
 
-# resource "newrelic_nrql_alert_condition" "ecs_high_cpu" {
-#   account_id                   = var.account_id
-#   policy_id                    = newrelic_alert_policy.ecs_policy.id
-#   type                         = "static"
-#   name                         = "ECS High CPU Usage"
-#   enabled                      = true
-#   violation_time_limit_seconds = 3600
-#   
-#   nrql {
-#     query = "SELECT average(cpuPercent) FROM ContainerSample WHERE ecsClusterName IS NOT NULL FACET ecsContainerName, ecsClusterName"
-#   }
-#   
-#   critical {
-#     operator              = "above"
-#     threshold             = 85
-#     threshold_duration    = 300
-#     threshold_occurrences = "all"
-#   }
-#   
-#   warning {
-#     operator              = "above"
-#     threshold             = 75
-#     threshold_duration    = 300
-#     threshold_occurrences = "all"
-#   }
-#   
-#   fill_option        = "none"
-#   aggregation_window = 60
-#   aggregation_method = "event_flow"
-#   aggregation_delay  = 120
-# }
+# ----------------------------------------------------------------------------
+# 6.1 HIGH THREAD COUNT
+# ----------------------------------------------------------------------------
+Name: ECS High Thread Count
+Priority: P2 - Warning
+Query: |
+  SELECT max(threadCount) as threads
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL
+  AND threadCount IS NOT NULL
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 5000 threads for at least 3 minutes
+  Warning: > 3000 threads for at least 5 minutes
+Description: |
+  Excessive thread count. May indicate thread leaks or improper concurrency.
+Remediation: |
+  - Check for thread leaks
+  - Review thread pool configuration
+  - Optimize concurrent operations
+  - Check for deadlocks
 
-# ====================
-# NOTIFICATION CHANNELS
-# ====================
-# Configure notification channels (Slack, PagerDuty, Email, etc.) in:
-# New Relic UI > Alerts > Notification Channels
-# or via Terraform using newrelic_notification_channel resource
+# ----------------------------------------------------------------------------
+# 6.2 FILE DESCRIPTOR EXHAUSTION
+# ----------------------------------------------------------------------------
+Name: ECS High File Descriptor Usage
+Priority: P2 - Warning
+Query: |
+  SELECT (average(fileDescriptorUsed) / average(fileDescriptorLimit)) * 100 as fdPercent
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL
+  AND fileDescriptorLimit IS NOT NULL
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 90% for at least 3 minutes
+  Warning: > 80% for at least 5 minutes
+Description: |
+  File descriptor usage high. May cause "too many open files" errors.
+Remediation: |
+  - Check for file/socket leaks
+  - Increase file descriptor limit
+  - Review connection management
+  - Close unused resources
 
-# ====================
-# BEST PRACTICES
-# ====================
-# 1. Adjust thresholds based on your baseline metrics
-#    Run queries with 'SINCE 7 days ago' to see normal patterns
-# 
-# 2. Use FACET to get per-container/cluster granularity
-#    This helps identify which specific containers have issues
-# 
-# 3. Set appropriate time windows to avoid alert fatigue
-#    Start with longer windows (5+ min) and tighten as needed
-# 
-# 4. Group related alerts into the same policy
-#    Example: "ECS Production Alerts" or "ECS Memory Alerts"
-# 
-# 5. Configure different notification channels for warning vs critical
-#    Warnings -> Slack, Critical -> PagerDuty
-# 
-# 6. Test alerts in staging before production
-#    Create a staging policy with tighter thresholds first
-# 
-# 7. Review and tune thresholds monthly based on actual usage patterns
-#    Use New Relic dashboards to visualize trends
-#
-# 8. For OOM prevention, implement a 3-tier approach:
-#    - 90% memory = Warning (investigate and plan)
-#    - 95% memory = Critical (immediate action needed)
-#    - Restart count increase = Post-incident analysis
-#
-# 9. Since exitCode isn't available, correlate restart patterns with memory spikes
-#    to identify OOM kills retrospectively
+# ----------------------------------------------------------------------------
+# 6.3 PROCESS COUNT EXCESSIVE
+# ----------------------------------------------------------------------------
+Name: ECS High Process Count
+Priority: P2 - Warning
+Query: |
+  SELECT max(processCount) as processes
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL
+  AND processCount IS NOT NULL
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 1000 processes for at least 3 minutes
+  Warning: > 500 processes for at least 5 minutes
+Description: |
+  Abnormally high process count. May indicate process leaks or fork bombs.
+Remediation: |
+  - Check for zombie processes
+  - Review process spawning logic
+  - Check for fork bombs
+  - Restart container if necessary
 
-# ====================
-# SETUP NOTES FOR YOUR ENVIRONMENT
-# ====================
-# Your New Relic setup uses:
-# - Field prefix: ecs* (ecsContainerName, ecsClusterName)
-# - Available: cpuPercent, memoryUsageLimitPercent, memorySizeLimitBytes, 
-#              memoryUsageBytes, memoryKernelUsageBytes, status, restartCount
-# - NOT available: exitCode, healthStatus, EcsTaskSample
-#
-# Next steps:
-# 1. Check if you have network fields (networkRx*, networkTx*)
-# 2. Check if you have I/O fields (ioRead*, ioWrite*)
-# 3. Add those optional alerts if fields exist
-# 4. Establish baseline thresholds by running queries with SINCE 7 days ago
+# ============================================================================
+# CATEGORY 7: DEPLOYMENT & CONFIGURATION
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 7.1 FAILED DEPLOYMENT DETECTION
+# ----------------------------------------------------------------------------
+Name: ECS Deployment Failing
+Priority: P1 - Critical
+Query: |
+  SELECT count(*) 
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  AND deploymentStatus = 'failed'
+  FACET ecsClusterName, ecsServiceName
+Threshold:
+  Critical: > 0 for at least 2 minutes
+Description: |
+  ECS deployment is failing. New version cannot be deployed.
+Remediation: |
+  - Check deployment logs
+  - Review task definition changes
+  - Verify image availability
+  - Check resource constraints
+
+# ----------------------------------------------------------------------------
+# 7.2 SLOW CONTAINER STARTUP
+# ----------------------------------------------------------------------------
+Name: ECS Slow Container Startup
+Priority: P2 - Warning
+Query: |
+  SELECT average(startupTimeSeconds) as startupSec
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL
+  AND startupTimeSeconds IS NOT NULL
+  FACET ecsContainerName, ecsClusterName
+Threshold:
+  Critical: > 300 seconds for at least 1 occurrence
+  Warning: > 180 seconds for at least 1 occurrence
+Description: |
+  Container taking excessive time to start. May indicate configuration issues.
+Remediation: |
+  - Optimize container initialization
+  - Review image size
+  - Check dependency startup times
+  - Review health check timing
+
+# ----------------------------------------------------------------------------
+# 7.3 IMAGE PULL FAILURES
+# ----------------------------------------------------------------------------
+Name: ECS Image Pull Errors
+Priority: P1 - Critical
+Query: |
+  SELECT count(*) 
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  AND (status = 'pending' AND statusReason LIKE '%image%')
+  FACET ecsContainerName, ecsClusterName, statusReason
+Threshold:
+  Critical: > 0 for at least 2 minutes
+Description: |
+  Cannot pull container image. Deployment blocked.
+Remediation: |
+  - Verify ECR permissions
+  - Check image exists and is tagged correctly
+  - Review network connectivity to registry
+  - Check ECR pull rate limits
+
+# ============================================================================
+# CATEGORY 8: CLUSTER-LEVEL ISSUES
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 8.1 CLUSTER CAPACITY EXHAUSTION
+# ----------------------------------------------------------------------------
+Name: ECS Cluster Low Capacity
+Priority: P1 - Critical
+Query: |
+  SELECT uniqueCount(ecsContainerName) / max(desiredCount) as capacityRatio
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL
+  FACET ecsClusterName
+Threshold:
+  Critical: < 0.7 (less than 70% of desired containers running)
+  Warning: < 0.85 (less than 85% of desired containers running)
+Description: |
+  Cluster cannot schedule desired number of containers. Insufficient resources.
+Remediation: |
+  - Add EC2 instances to cluster
+  - Enable cluster auto-scaling
+  - Review resource reservations
+  - Optimize container resource requests
+
+# ----------------------------------------------------------------------------
+# 8.2 NO RUNNING CONTAINERS IN SERVICE
+# ----------------------------------------------------------------------------
+Name: ECS Service Zero Containers
+Priority: P0 - Emergency
+Query: |
+  SELECT count(*) 
+  FROM ContainerSample 
+  WHERE ecsClusterName IS NOT NULL 
+  AND status = 'running'
+  FACET ecsClusterName, ecsServiceName
+Threshold:
+  Critical: = 0 for at least 1 minute
+Description: |
+  Complete service outage. No running containers.
+Remediation: |
+  - IMMEDIATE: Check ECS console for errors
+  - Verify service desired count
+  - Check for deployment failures
+  - Review recent changes
+  - Manually start tasks if needed
